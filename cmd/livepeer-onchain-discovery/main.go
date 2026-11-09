@@ -19,7 +19,7 @@ import (
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Getenv, os.ReadFile, os.Stderr); err != nil {
+	if err := run(os.Args[1:], os.Getenv, os.Stderr); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)
 		}
@@ -28,28 +28,23 @@ func main() {
 	}
 }
 
-func run(args []string, getenv func(string) string, readFile func(string) ([]byte, error), logOut *os.File) error {
-	settings, err := serve.LoadSettings(args, getenv, readFile)
+func run(args []string, getenv func(string) string, logOut *os.File) error {
+	settings, err := serve.LoadSettings(args, getenv)
 	if err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(logOut, nil))
-	var rpc *eth.RPC
-	if settings.RPCURL != "" {
-		rpc, err = eth.OpenRPC(settings.RPCURL)
-		if err != nil {
-			return err
-		}
-		defer rpc.Close()
-		contracts, err := eth.OpenContracts(rpc, settings.Controller)
-		if err != nil {
-			return err
-		}
-		settings.Config.Directory = &directory.Directory{
-			Chain: contracts, ServiceRegistry: settings.ServiceRegistry, Logger: logger,
-		}
-	} else if settings.ServiceRegistry != "" {
-		return errors.New("service registry requires an RPC URL")
+	rpc, err := eth.OpenRPC(settings.RPCURL)
+	if err != nil {
+		return err
+	}
+	defer rpc.Close()
+	contracts, err := eth.OpenContracts(rpc, settings.Controller)
+	if err != nil {
+		return err
+	}
+	settings.Config.Directory = &directory.Directory{
+		Chain: contracts, ServiceRegistry: settings.ServiceRegistry, Logger: logger,
 	}
 	settings.Config.Logger = logger
 	service, err := serve.New(settings.Config)

@@ -4,11 +4,14 @@ A discovery process for Livepeer AI orchestrators. It reads the bonded pool on
 Arbitrum, keeps the orchestrators registered with an https service URI, and
 serves their runner inventories at `GET /discovery`.
 
-`livepeer discovery` in [livepeer/node](https://github.com/livepeer/node) v1.0.6
-only polls a static `Nodes` list. Its chain inspection reads the Controller's
-protocol `ServiceRegistry`, which is the transcoding registry, and its server
-cannot replace that list after startup. This process uses the node's chain
-client and discovery collector, and supplies the list the node does not.
+`livepeer discovery` in [livepeer/node](https://github.com/livepeer/node) polls
+a static `Nodes` list from a TOML config
+([config.example.toml](https://github.com/livepeer/node/blob/main/configs/discovery/config.example.toml)).
+Its chain inspection reads the Controller's protocol `ServiceRegistry`, which
+is the transcoding registry. This process uses the node's chain client and
+discovery collector, and it reads the AI Service Registry instead. It does not
+take a static list: a fixed orchestrator file is the node's job, and that
+config is TOML, not a text file of URLs.
 
 The inventory format is the one `livepeer/node` serves. A builder engine that
 today uses `lpb discovery` can point `LPB_DISCOVERY_URL` here once this process
@@ -58,12 +61,11 @@ These registrations are not kept:
 One orchestrator whose own call reverts is skipped. A failure of the RPC
 itself (HTTP 429 or 5xx, JSON-RPC `-32005` or `-32603`, or a transport
 failure) is retried after 0.5s and 2s, then the load fails and the previous
-directory is kept. The first failed load still publishes any static URLs the
-operator configured. A malformed chain result fails the load rather than being
-read as "not registered".
+directory is kept. The first failed load publishes nothing. A malformed chain
+result fails the load rather than being read as "not registered".
 
-Static base URLs are extra sources. With no RPC URL the process serves only
-that list. Each source is probed at `<base>/discovery`.
+Each registered source is probed at `<base>/discovery`. There is no static
+list and no orchestrator file.
 
 ## HTTP
 
@@ -94,7 +96,6 @@ Flags override the environment when the flag is present. Names use the prefix
 | `--rpc-url` | `RPC_URL` | unset. Required for the chain directory |
 | `--controller` | `CONTROLLER` | `0xD8E8328501E9645d16Cf49539efC04f734606ee4` |
 | `--service-registry` | `SERVICE_REGISTRY` | the AI Service Registry. `controller` reads the protocol registry |
-| `--nodes` | `NODES` | unset. Comma-separated base URLs, or a file with one URL per line. `#` starts a comment |
 | `--directory-interval` | `DIRECTORY_INTERVAL` | `1h` |
 | `--refresh-interval` | `REFRESH_INTERVAL` | `5m` |
 | `--max-failed-refreshes` | `MAX_FAILED_REFRESHES` | `6`. `0` evicts on the first failed probe |
@@ -114,9 +115,10 @@ runners. Current stacks that depend on v1.0.2 inventories should stay on
 
 - One process, and the existing `GET /discovery` contract. The engine is
   unchanged.
-- The node's collector does the probing. This repository only decides the
-  source list and serves the collector's cache. `discovery.Server` keeps its
-  list unexported, so the list is applied with `Collector.SetSources`.
+- The node's collector does the probing. This repository decides the source
+  list from the chain and serves the collector's cache. `discovery.Server`
+  keeps its list unexported, so the list is applied with `Collector.SetSources`.
+  A static `Nodes` list stays in livepeer/node's TOML config.
 - The AI Service Registry is the default because that is where AI orchestrators
   register, and the Controller does not know that contract.
 - Health and discovery share one listener so a check of port 8939 sees

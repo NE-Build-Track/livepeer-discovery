@@ -1,7 +1,6 @@
 package serve
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"net"
@@ -24,8 +23,8 @@ type Settings struct {
 }
 
 // LoadSettings reads flags and, for any flag left unset, the environment.
-// A nodes value without a scheme is a file of base URLs, one per line.
-func LoadSettings(args []string, getenv func(string) string, readFile func(string) ([]byte, error)) (Settings, error) {
+// The process reads the chain only. A static orchestrator list is not a setting.
+func LoadSettings(args []string, getenv func(string) string) (Settings, error) {
 	if getenv == nil {
 		getenv = func(string) string { return "" }
 	}
@@ -36,7 +35,6 @@ func LoadSettings(args []string, getenv func(string) string, readFile func(strin
 	rpcFlag := fs.String("rpc-url", "", "Arbitrum JSON-RPC URL")
 	controllerFlag := fs.String("controller", directory.ArbitrumController, "Controller contract address")
 	registryFlag := fs.String("service-registry", "", "Service registry address, or controller")
-	nodesFlag := fs.String("nodes", "", "Comma-separated base URLs, or a file with one per line")
 	directoryFlag := fs.String("directory-interval", "1h", "How often to reload the chain directory")
 	refreshFlag := fs.String("refresh-interval", "5m", "How often to probe each source")
 	maxFailedFlag := fs.String("max-failed-refreshes", "6", "Consecutive failed probes before a source is evicted")
@@ -50,7 +48,6 @@ func LoadSettings(args []string, getenv func(string) string, readFile func(strin
 	rpc := chosen(set, "rpc-url", *rpcFlag, getenv("LIVEPEER_ONCHAIN_DISCOVERY_RPC_URL"))
 	controllerValue := chosen(set, "controller", *controllerFlag, getenv("LIVEPEER_ONCHAIN_DISCOVERY_CONTROLLER"))
 	registry := chosen(set, "service-registry", *registryFlag, getenv("LIVEPEER_ONCHAIN_DISCOVERY_SERVICE_REGISTRY"))
-	nodes := chosen(set, "nodes", *nodesFlag, getenv("LIVEPEER_ONCHAIN_DISCOVERY_NODES"))
 	directoryInterval := chosen(set, "directory-interval", *directoryFlag, getenv("LIVEPEER_ONCHAIN_DISCOVERY_DIRECTORY_INTERVAL"))
 	refresh := chosen(set, "refresh-interval", *refreshFlag, getenv("LIVEPEER_ONCHAIN_DISCOVERY_REFRESH_INTERVAL"))
 	maxFailed := chosen(set, "max-failed-refreshes", *maxFailedFlag, getenv("LIVEPEER_ONCHAIN_DISCOVERY_MAX_FAILED_REFRESHES"))
@@ -71,9 +68,8 @@ func LoadSettings(args []string, getenv func(string) string, readFile func(strin
 	if _, _, err := net.SplitHostPort(strings.TrimSpace(listen)); err != nil {
 		return Settings{}, fmt.Errorf("listen address must be host:port")
 	}
-	static, err := nodeList(strings.TrimSpace(nodes), readFile)
-	if err != nil {
-		return Settings{}, err
+	if strings.TrimSpace(rpc) == "" {
+		return Settings{}, fmt.Errorf("RPC URL is required")
 	}
 	controllerAddr := strings.TrimSpace(controllerValue)
 	if controllerAddr == "" {
@@ -81,7 +77,7 @@ func LoadSettings(args []string, getenv func(string) string, readFile func(strin
 	}
 	return Settings{
 		Config: Config{
-			Static: static, Grants: splitList(grants),
+			Grants:          splitList(grants),
 			RefreshInterval: refreshEvery, DirectoryInterval: directoryEvery, MaxFailedRefreshes: failed,
 		},
 		Listen: strings.TrimSpace(listen), RPCURL: strings.TrimSpace(rpc),
@@ -99,35 +95,6 @@ func chosen(set map[string]bool, name, flagValue, envValue string) string {
 		return envValue
 	}
 	return flagValue
-}
-
-func nodeList(value string, readFile func(string) ([]byte, error)) ([]string, error) {
-	if value == "" {
-		return nil, nil
-	}
-	if strings.Contains(value, "://") {
-		return splitList(value), nil
-	}
-	if readFile == nil {
-		return nil, fmt.Errorf("cannot read the orchestrator list")
-	}
-	body, err := readFile(value)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read the orchestrator list")
-	}
-	var nodes []string
-	scanner := bufio.NewScanner(strings.NewReader(string(body)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		nodes = append(nodes, line)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("cannot read the orchestrator list")
-	}
-	return nodes, nil
 }
 
 func splitList(value string) []string {

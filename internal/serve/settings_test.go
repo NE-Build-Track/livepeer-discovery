@@ -6,18 +6,12 @@ import (
 	"time"
 )
 
-func TestSettingsUseTheChainDefaultsAndANodeFile(t *testing.T) {
+func TestSettingsUseTheChainDefaults(t *testing.T) {
 	env := map[string]string{
 		"LIVEPEER_ONCHAIN_DISCOVERY_RPC_URL":          "https://rpc.example/v2/secret",
-		"LIVEPEER_ONCHAIN_DISCOVERY_NODES":            "/etc/livepeer/orchestrators.txt",
 		"LIVEPEER_ONCHAIN_DISCOVERY_SERVICE_REGISTRY": "controller",
 	}
-	settings, err := LoadSettings(nil, func(key string) string { return env[key] }, func(name string) ([]byte, error) {
-		if name != "/etc/livepeer/orchestrators.txt" {
-			t.Fatalf("read %s", name)
-		}
-		return []byte("# comment\nhttps://a.example\n\nhttps://b.example/\n"), nil
-	})
+	settings, err := LoadSettings(nil, func(key string) string { return env[key] })
 	if err != nil {
 		t.Fatalf("LoadSettings: %v", err)
 	}
@@ -27,7 +21,11 @@ func TestSettingsUseTheChainDefaultsAndANodeFile(t *testing.T) {
 	if settings.Listen != "127.0.0.1:8939" || settings.Config.DirectoryInterval != time.Hour || settings.Config.RefreshInterval != 5*time.Minute || settings.Config.MaxFailedRefreshes != 6 {
 		t.Fatalf("intervals = %+v listen %s", settings.Config, settings.Listen)
 	}
-	if strings.Join(settings.Config.Static, ",") != "https://a.example,https://b.example/" {
-		t.Fatalf("nodes = %v", settings.Config.Static)
+}
+
+func TestSettingsRequireAnRPCURL(t *testing.T) {
+	_, err := LoadSettings(nil, func(string) string { return "" })
+	if err == nil || !strings.Contains(err.Error(), "RPC URL is required") {
+		t.Fatalf("LoadSettings error = %v, want a missing RPC URL", err)
 	}
 }

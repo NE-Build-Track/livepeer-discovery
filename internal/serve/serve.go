@@ -19,10 +19,14 @@ import (
 	shared "github.com/livepeer/node/discovery/shared"
 )
 
+// Directory is the chain read. The service probes whatever Load returns.
+type Directory interface {
+	Load(ctx context.Context) ([]directory.Orchestrator, error)
+}
+
 // Config selects who is probed and how often.
 type Config struct {
-	Directory          *directory.Directory
-	Static             []string
+	Directory          Directory
 	Grants             []string
 	RefreshInterval    time.Duration
 	DirectoryInterval  time.Duration
@@ -33,8 +37,7 @@ type Config struct {
 // Service is the discovery HTTP handler. Run refreshes the directory and the
 // collector until the context ends.
 type Service struct {
-	directory      *directory.Directory
-	static         []*url.URL
+	directory      Directory
 	refresh        time.Duration
 	directoryEvery time.Duration
 	logger         *slog.Logger
@@ -55,14 +58,6 @@ func New(cfg Config) (*Service, error) {
 	if cfg.RefreshInterval <= 0 || cfg.DirectoryInterval <= 0 {
 		return nil, errors.New("refresh and directory intervals must be positive")
 	}
-	static := make([]*url.URL, 0, len(cfg.Static))
-	for _, raw := range cfg.Static {
-		parsed, err := parseBase(raw)
-		if err != nil {
-			return nil, err
-		}
-		static = append(static, parsed)
-	}
 	policy, err := destination.New("discovery", cfg.Grants)
 	if err != nil {
 		return nil, err
@@ -79,8 +74,8 @@ func New(cfg Config) (*Service, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	s := &Service{
-		directory: cfg.Directory, static: static,
-		refresh: cfg.RefreshInterval, directoryEvery: cfg.DirectoryInterval,
+		directory: cfg.Directory,
+		refresh:   cfg.RefreshInterval, directoryEvery: cfg.DirectoryInterval,
 		logger: logger,
 		collector: &shared.Collector[runner]{
 			Client: client, MaxFailures: failures, Logger: logger,
@@ -99,11 +94,6 @@ func (s *Service) Reload(ctx context.Context) error {
 	bases, err := s.bases(ctx)
 	if err != nil {
 		s.noteError(err)
-		// The chain is unread, so the operator's static list is the whole directory.
-		// A later failure keeps whatever already loaded, including a chain result.
-		if !s.loadedOnce() && len(s.static) > 0 {
-			s.setSources(s.static)
-		}
 		return err
 	}
 	s.noteLoaded()
@@ -158,7 +148,7 @@ func (s *Service) bases(ctx context.Context) ([]*url.URL, error) {
 			return nil, err
 		}
 	}
-	bases := make([]*url.URL, 0, len(chain)+len(s.static))
+	bases := make([]*url.URL, 0, len(chain))
 	seen := map[string]bool{}
 	for _, orch := range chain {
 		parsed, err := url.Parse(orch.URL)
@@ -166,14 +156,6 @@ func (s *Service) bases(ctx context.Context) ([]*url.URL, error) {
 			continue
 		}
 		parsed.Path = strings.TrimRight(parsed.Path, "/")
-		key := parsed.String()
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		bases = append(bases, parsed)
-	}
-	for _, parsed := range s.static {
 		key := parsed.String()
 		if seen[key] {
 			continue
@@ -203,12 +185,6 @@ func (s *Service) sources() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.current...)
-}
-
-func (s *Service) loadedOnce() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.loaded
 }
 
 func (s *Service) noteLoaded() {
@@ -329,16 +305,6 @@ func reason(err error) string {
 		return "interrupted"
 	}
 	return "directory_unavailable"
-}
-
-func parseBase(raw string) (*url.URL, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || shared.ValidateURL(parsed) != nil {
-		return nil, errors.New("invalid discovery URL")
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	return parsed, nil
 }
 
 func discoveryEndpoint(base *url.URL) *url.URL {

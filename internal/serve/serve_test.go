@@ -53,11 +53,10 @@ type toggleChain struct {
 	uri  string
 }
 
-func TestStaticSourcesStayAvailableWhenTheFirstChainLoadFails(t *testing.T) {
+func TestAFailedFirstLoadPublishesNothing(t *testing.T) {
 	chain := &toggleChain{fail: true, uri: "https://chain.example"}
 	svc, err := New(Config{
 		Directory:          &directory.Directory{Chain: chain, RetryDelays: []time.Duration{}},
-		Static:             []string{"https://static.example"},
 		RefreshInterval:    time.Hour,
 		DirectoryInterval:  time.Hour,
 		MaxFailedRefreshes: 6,
@@ -68,8 +67,8 @@ func TestStaticSourcesStayAvailableWhenTheFirstChainLoadFails(t *testing.T) {
 	if err := svc.Reload(context.Background()); err == nil {
 		t.Fatal("reload succeeded, want the chain error")
 	}
-	if got := svc.sources(); len(got) != 1 || got[0] != "https://static.example/discovery" {
-		t.Fatalf("sources = %v, want the static list while the chain is unread", got)
+	if got := svc.sources(); len(got) != 0 {
+		t.Fatalf("sources = %v, want nothing until the chain loads", got)
 	}
 }
 
@@ -84,7 +83,7 @@ func TestDiscoveryStaysUnreadyUntilAProbeThenServesTheInventory(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	svc, err := New(Config{
-		Static:             []string{upstream.URL},
+		Directory:          fixedDirectory{urls: []string{upstream.URL}},
 		Grants:             []string{"127.0.0.1"},
 		RefreshInterval:    time.Hour,
 		DirectoryInterval:  time.Hour,
@@ -144,6 +143,16 @@ func get(svc *Service, path string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	svc.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 	return rec
+}
+
+type fixedDirectory struct{ urls []string }
+
+func (d fixedDirectory) Load(context.Context) ([]directory.Orchestrator, error) {
+	out := make([]directory.Orchestrator, len(d.urls))
+	for i, raw := range d.urls {
+		out[i] = directory.Orchestrator{URL: raw}
+	}
+	return out, nil
 }
 
 func (c *toggleChain) Resolve(context.Context, string) (common.Address, error) {

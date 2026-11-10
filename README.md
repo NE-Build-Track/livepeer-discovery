@@ -111,6 +111,27 @@ node collector's: 5 at a time, a 3s timeout, no redirects, and the system's
 trust store. Private addresses are refused unless granted. The cache is memory
 only and is dropped on exit.
 
+## What each orchestrator may advertise
+
+Each registered orchestrator speaks only for itself. An entry whose `address` is
+not the probed orchestrator's registered base URL is dropped and logged as
+`discovery.foreign_entry_dropped`, with the orchestrator's on-chain address.
+Scheme, host, port and path are compared; a default port or a trailing slash
+does not matter. A stock livepeer/node orchestrator always reports its own
+service address.
+
+A runner URL that more than one orchestrator advertises is kept from each of
+them, and the node collector's merge serves the newest record. It is logged as
+`discovery.runner_url_contested`, with every orchestrator's on-chain address.
+The contract cannot say who owns a runner URL, which may sit on a proxy host.
+
+Each finding is logged once, when it first appears. `/readyz` reports the last
+probe round's counts as `dropped_foreign_entries` and `contested_runner_urls`.
+
+There is no allowlist, and no rule on a runner's `metadata`: the chain's
+admission bar above is the only one. A curated list belongs in livepeer/node's
+static `Nodes` configuration.
+
 ## Settings
 
 Flags override the environment when the flag is present. Names use the prefix

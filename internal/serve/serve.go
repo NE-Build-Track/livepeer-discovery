@@ -8,13 +8,16 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/NE-Build-Track/livepeer-onchain-discovery/internal/directory"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/node/destination"
 	shared "github.com/livepeer/node/discovery/shared"
 )
@@ -52,7 +55,10 @@ type Service struct {
 
 	mu            sync.Mutex
 	current       []string
+	registered    map[string]source // by discovery endpoint
 	orchestrators int
+	report        report   // the last probe round's trust findings
+	reported      []string // their log keys, so a finding is logged when it starts
 	loaded        bool
 	loadedAt      time.Time
 	probed        bool // a directory load and then one complete probe round have finished
@@ -102,14 +108,14 @@ func New(cfg Config) (*Service, error) {
 // Reload reads the directory once. A failed read leaves the previous sources
 // in place.
 func (s *Service) Reload(ctx context.Context) error {
-	bases, err := s.bases(ctx)
+	registered, err := s.bases(ctx)
 	if err != nil {
 		s.noteError(err)
 		return err
 	}
 	s.noteLoaded()
-	s.setSources(bases)
-	if len(bases) == 0 {
+	s.setSources(registered)
+	if len(registered) == 0 {
 		s.collector.AcceptEmpty()
 	}
 	return nil
@@ -163,9 +169,14 @@ func (s *Service) probe(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	_, findings := s.inventory()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.probed = s.loaded
+	s.report = findings
+	previous := s.reported
+	s.reported = findings.keys()
+	s.mu.Unlock()
+	findings.log(ctx, s.logger, previous)
 }
 
 func (s *Service) setRunning(running bool) {
@@ -182,7 +193,13 @@ func (s *Service) hasProbed() bool {
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
-func (s *Service) bases(ctx context.Context) ([]*url.URL, error) {
+// source is a registered orchestrator: the base URL it registered on chain, and its address.
+type source struct {
+	base    *url.URL
+	address common.Address
+}
+
+func (s *Service) bases(ctx context.Context) ([]source, error) {
 	var chain []directory.Orchestrator
 	if s.directory != nil {
 		var err error
@@ -191,7 +208,7 @@ func (s *Service) bases(ctx context.Context) ([]*url.URL, error) {
 			return nil, err
 		}
 	}
-	bases := make([]*url.URL, 0, len(chain))
+	registered := make([]source, 0, len(chain))
 	seen := map[string]bool{}
 	for _, orch := range chain {
 		parsed, err := url.Parse(orch.URL)
@@ -204,21 +221,24 @@ func (s *Service) bases(ctx context.Context) ([]*url.URL, error) {
 			continue
 		}
 		seen[key] = true
-		bases = append(bases, parsed)
+		registered = append(registered, source{base: parsed, address: orch.Address})
 	}
-	return bases, nil
+	return registered, nil
 }
 
-func (s *Service) setSources(bases []*url.URL) {
-	endpoints := make([]*url.URL, 0, len(bases))
-	stored := make([]string, 0, len(bases))
-	for _, base := range bases {
-		endpoint := discoveryEndpoint(base)
+func (s *Service) setSources(registered []source) {
+	endpoints := make([]*url.URL, 0, len(registered))
+	stored := make([]string, 0, len(registered))
+	byEndpoint := make(map[string]source, len(registered))
+	for _, src := range registered {
+		endpoint := discoveryEndpoint(src.base)
 		endpoints = append(endpoints, endpoint)
 		stored = append(stored, endpoint.String())
+		byEndpoint[endpoint.String()] = src
 	}
 	s.mu.Lock()
 	s.current = stored
+	s.registered = byEndpoint
 	s.orchestrators = len(stored)
 	s.mu.Unlock()
 	s.collector.SetSources(endpoints)
@@ -274,6 +294,7 @@ func (s *Service) readyResponse() (readyBody, int) {
 	}
 	body := readyBody{
 		Ready: ready, Refreshing: s.running, Orchestrators: s.orchestrators, Serving: serving,
+		DroppedForeignEntries: len(s.report.dropped), ContestedRunnerURLs: len(s.report.contested),
 	}
 	if s.loaded {
 		loaded := s.loadedAt
@@ -298,6 +319,10 @@ type readyBody struct {
 	DirectoryLoadedAt *time.Time `json:"directory_loaded_at"`
 	ProbedAt          *time.Time `json:"probed_at"`
 	DirectoryError    *string    `json:"directory_error"`
+	// From the last probe round: entries dropped because their address was not the probed
+	// orchestrator's own, and runner URLs that more than one orchestrator advertised.
+	DroppedForeignEntries int `json:"dropped_foreign_entries"`
+	ContestedRunnerURLs   int `json:"contested_runner_urls"`
 }
 
 func (s *Service) discovery(w http.ResponseWriter, r *http.Request) {
@@ -320,27 +345,136 @@ func (s *Service) discovery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) discoveryResponse() []map[string]any {
-	type node struct {
-		URL       string    `json:"url"`
-		QueriedAt time.Time `json:"queried_at"`
-	}
-	var nodes []node
-	var entries []shared.Entry[runner]
-	for _, snapshot := range s.collector.Snapshots() {
-		nodes = append(nodes, node{URL: strings.TrimSuffix(snapshot.URL, "/discovery"), QueriedAt: snapshot.QueriedAt})
-		entries = append(entries, snapshot.Entries...)
-	}
 	result := []map[string]any{}
-	if len(nodes) > 0 {
-		result = append(result, map[string]any{"nodes": nodes})
+	inv, _ := s.inventory()
+	if len(inv.nodes) > 0 {
+		result = append(result, map[string]any{"nodes": inv.nodes})
 	}
-	for _, entry := range shared.Merge(entries) {
+	for _, entry := range shared.Merge(inv.entries) {
 		if len(entry.Runners) == 0 {
 			continue
 		}
 		result = append(result, map[string]any{"address": entry.Address, "runners": entry.Runners})
 	}
 	return result
+}
+
+type node struct {
+	URL       string    `json:"url"`
+	QueriedAt time.Time `json:"queried_at"`
+}
+
+type collected struct {
+	nodes   []node
+	entries []shared.Entry[runner]
+}
+
+// inventory is what the sources answered, keeping only the entries each orchestrator wrote for
+// itself (issue #1, item 4). Each registered orchestrator speaks only for its own base URL: an entry
+// under another address is dropped. A runner URL more than one orchestrator advertises is kept from
+// each of them, and node's Merge picks the newest; the contract cannot say who owns a runner URL,
+// which may sit on a proxy host.
+func (s *Service) inventory() (collected, report) {
+	s.mu.Lock()
+	registered := s.registered
+	s.mu.Unlock()
+	var out collected
+	var findings report
+	claims := map[string]map[common.Address]bool{}
+	for _, snapshot := range s.collector.Snapshots() {
+		out.nodes = append(out.nodes, node{URL: strings.TrimSuffix(snapshot.URL, "/discovery"), QueriedAt: snapshot.QueriedAt})
+		src, known := registered[snapshot.URL]
+		for _, entry := range snapshot.Entries {
+			if !known || !sameBase(entry.Address, src.base) {
+				findings.dropped = append(findings.dropped, dropped{orchestrator: src.address, source: snapshot.URL, address: entry.Address})
+				continue
+			}
+			out.entries = append(out.entries, entry)
+			for _, r := range entry.Runners {
+				if claims[r.URL] == nil {
+					claims[r.URL] = map[common.Address]bool{}
+				}
+				claims[r.URL][src.address] = true
+			}
+		}
+	}
+	for runnerURL, by := range claims {
+		if len(by) > 1 {
+			addresses := make([]string, 0, len(by))
+			for address := range by {
+				addresses = append(addresses, address.Hex())
+			}
+			slices.Sort(addresses)
+			findings.contested = append(findings.contested, contested{runner: runnerURL, orchestrators: addresses})
+		}
+	}
+	slices.SortFunc(findings.contested, func(a, b contested) int { return strings.Compare(a.runner, b.runner) })
+	return out, findings
+}
+
+// sameBase compares URLs by scheme, host, port (a default port is the same as none) and path.
+func sameBase(reported string, registered *url.URL) bool {
+	parsed, err := url.Parse(reported)
+	return err == nil && canonicalBase(parsed) == canonicalBase(registered)
+}
+
+func canonicalBase(u *url.URL) string {
+	scheme, host, port := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname()), u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" || strings.Contains(host, ":") {
+		host = net.JoinHostPort(host, port)
+		host = strings.TrimSuffix(host, ":")
+	}
+	return scheme + "://" + host + strings.TrimRight(u.EscapedPath(), "/")
+}
+
+type dropped struct {
+	orchestrator common.Address
+	source       string
+	address      string
+}
+
+type contested struct {
+	runner        string
+	orchestrators []string
+}
+
+type report struct {
+	dropped   []dropped
+	contested []contested
+}
+
+func (r report) keys() []string {
+	keys := make([]string, 0, len(r.dropped)+len(r.contested))
+	for _, d := range r.dropped {
+		keys = append(keys, "drop|"+d.source+"|"+d.address)
+	}
+	for _, c := range r.contested {
+		keys = append(keys, "contest|"+c.runner+"|"+strings.Join(c.orchestrators, ","))
+	}
+	return keys
+}
+
+// log writes each finding that was not in the previous round, so a standing finding is logged once
+// when it starts, and again if it stops and comes back. /readyz reports the current counts.
+func (r report) log(ctx context.Context, logger *slog.Logger, previous []string) {
+	for _, d := range r.dropped {
+		if slices.Contains(previous, "drop|"+d.source+"|"+d.address) {
+			continue
+		}
+		logger.WarnContext(ctx, "dropped an entry the orchestrator wrote for another address",
+			"event", "discovery.foreign_entry_dropped", "orchestrator", d.orchestrator.Hex(),
+			"source", d.source, "address", d.address)
+	}
+	for _, c := range r.contested {
+		if slices.Contains(previous, "contest|"+c.runner+"|"+strings.Join(c.orchestrators, ",")) {
+			continue
+		}
+		logger.WarnContext(ctx, "more than one orchestrator advertises this runner URL",
+			"event", "discovery.runner_url_contested", "runner", c.runner, "orchestrators", strings.Join(c.orchestrators, ","))
+	}
 }
 
 func reason(err error) string {

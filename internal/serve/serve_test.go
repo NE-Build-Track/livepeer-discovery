@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -201,15 +200,10 @@ func (c *flakyChain) Call(ctx context.Context, name string, address common.Addre
 }
 
 func TestDiscoveryStaysUnreadyUntilAProbeThenServesTheInventory(t *testing.T) {
-	const inventory = `[{"address":"https://child.example","runners":[{"url":"https://child.example/app","app":"test","observed_at":"1999-01-01T00:00:00Z","price_usd":"1.25"}]}]`
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/discovery" {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = io.WriteString(w, inventory)
-	}))
-	t.Cleanup(upstream.Close)
+	// The orchestrator writes its entry under its own base URL; an entry for another address is dropped.
+	upstream := orchestrator(t, nil, func(base string) string {
+		return `[{"address":"` + base + `","runners":[{"url":"https://child.example/app","app":"test","observed_at":"1999-01-01T00:00:00Z","price_usd":"1.25"}]}]`
+	})
 	svc, err := New(Config{
 		Directory:          fixedDirectory{urls: []string{upstream.URL}},
 		Grants:             []string{"127.0.0.1"},
@@ -262,7 +256,7 @@ func TestDiscoveryStaysUnreadyUntilAProbeThenServesTheInventory(t *testing.T) {
 	if _, ok := body[0]["nodes"]; !ok {
 		t.Fatalf("first entry has no nodes metadata: %s", body[0])
 	}
-	if string(body[1]["address"]) != `"https://child.example"` || !strings.Contains(string(body[1]["runners"]), `"price_usd":"1.25"`) {
+	if string(body[1]["address"]) != `"`+upstream.URL+`"` || !strings.Contains(string(body[1]["runners"]), `"price_usd":"1.25"`) {
 		t.Fatalf("runner record was not passed through: %s", body[1])
 	}
 }

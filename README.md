@@ -77,8 +77,9 @@ These registrations are not kept:
 One orchestrator whose own call reverts is skipped. A failure of the RPC
 itself (HTTP 429 or 5xx, JSON-RPC `-32005` or `-32603`, or a transport
 failure) is retried after 0.5s and 2s, then the load fails and the previous
-directory is kept. The first failed load publishes nothing. A malformed chain
-result fails the load rather than being read as "not registered".
+directory is kept. A failed first load is retried after 30s, doubling up to the
+directory interval, and nothing is published until a load succeeds. A malformed
+chain result fails the load rather than being read as "not registered".
 
 Each registered source is probed at `<base>/discovery`. There is no static
 list and no orchestrator file.
@@ -89,10 +90,18 @@ list and no orchestrator file.
 each source that has answered and when it was last queried. Runner objects are
 the JSON the orchestrator sent. There is no app filter.
 
+Until the first directory load and the first complete probe round have finished,
+`/discovery` answers 503, not an empty inventory. A consumer, livepeer/node's
+`livepeer-discovery` or an engine, keeps what it had after a non-200, while `[]`
+would tell it the chain has no runners. From then on it answers 200, including a
+genuine `[]`.
+
 `GET /healthz` is 200 while the process is serving.
 
-`GET /readyz` is 503 until a directory load has succeeded and one probe pass
-has finished, then 200 while the refresh loops are running. `directory_error`
+`GET /readyz` is 503 until a directory load has succeeded and one complete probe
+round over every source has finished, then 200 while the refresh loops are
+running. There is no quorum: `orchestrators` and `serving` report how many
+sources are registered and how many answered, for alerting. `directory_error`
 is a stable reason this process wrote (`rpc_http_429`, `rpc_error_-32000`,
 `rpc_request_failed`, `malformed_result`, `contract_unresolved`), or null. It
 is not the provider's error text.

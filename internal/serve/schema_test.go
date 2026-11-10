@@ -86,7 +86,7 @@ func probed(t *testing.T, cfg Config) (*Service, *httptest.Server) {
 	if err := svc.Reload(ctx); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	svc.collector.Refresh(ctx, false)
+	svc.probe(ctx)
 	front := httptest.NewServer(svc)
 	t.Cleanup(front.Close)
 	return svc, front

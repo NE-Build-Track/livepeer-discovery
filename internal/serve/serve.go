@@ -31,8 +31,13 @@ type Config struct {
 	RefreshInterval    time.Duration
 	DirectoryInterval  time.Duration
 	MaxFailedRefreshes int
-	Logger             *slog.Logger
+	// FirstLoadRetry is the first wait after a failed first directory load. It doubles up to
+	// DirectoryInterval. Zero means 30s.
+	FirstLoadRetry time.Duration
+	Logger         *slog.Logger
 }
+
+const defaultFirstLoadRetry = 30 * time.Second
 
 // Service is the discovery HTTP handler. Run refreshes the directory and the
 // collector until the context ends.
@@ -40,6 +45,7 @@ type Service struct {
 	directory      Directory
 	refresh        time.Duration
 	directoryEvery time.Duration
+	firstRetry     time.Duration
 	logger         *slog.Logger
 	collector      *shared.Collector[runner]
 	mux            *http.ServeMux
@@ -49,6 +55,7 @@ type Service struct {
 	orchestrators int
 	loaded        bool
 	loadedAt      time.Time
+	probed        bool // a directory load and then one complete probe round have finished
 	dirErr        string
 	running       bool
 }
@@ -69,13 +76,17 @@ func New(cfg Config) (*Service, error) {
 	if failures < 1 {
 		failures = 1
 	}
+	firstRetry := cfg.FirstLoadRetry
+	if firstRetry <= 0 {
+		firstRetry = defaultFirstLoadRetry
+	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	s := &Service{
 		directory: cfg.Directory,
-		refresh:   cfg.RefreshInterval, directoryEvery: cfg.DirectoryInterval,
+		refresh:   cfg.RefreshInterval, directoryEvery: cfg.DirectoryInterval, firstRetry: firstRetry,
 		logger: logger,
 		collector: &shared.Collector[runner]{
 			Client: client, MaxFailures: failures, Logger: logger,
@@ -104,37 +115,69 @@ func (s *Service) Reload(ctx context.Context) error {
 	return nil
 }
 
-// Run reloads the directory on its interval and probes until ctx ends.
+// Run loads the directory, probes every source once, and then keeps both fresh until ctx ends.
+//
+// Until the first load and the first complete probe round, /discovery answers 503 and /readyz is
+// not ready: an empty 200 would tell a consumer the chain has no runners. A failed first load is
+// retried after FirstLoadRetry, doubling up to the directory interval. A later failed load keeps
+// the previous sources. Run alone starts probe rounds, so a round it waits for is a whole one.
 func (s *Service) Run(ctx context.Context) {
-	s.mu.Lock()
-	s.running = true
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-	}()
-	var workers sync.WaitGroup
-	workers.Add(2)
-	go func() {
-		defer workers.Done()
-		s.collector.Run(ctx, s.refresh)
-	}()
-	go func() {
-		defer workers.Done()
-		s.Reload(ctx)
-		ticker := time.NewTicker(s.directoryEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.Reload(ctx)
+	s.setRunning(true)
+	defer s.setRunning(false)
+	defer s.collector.Close()
+	wait := s.firstRetry
+	for s.Reload(ctx) != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		s.logger.WarnContext(ctx, "first directory load failed; retrying", "event", "discovery.first_load_retry", "wait", wait.String())
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, s.directoryEvery)
+	}
+	s.probe(ctx)
+	refresh := time.NewTicker(s.refresh)
+	defer refresh.Stop()
+	reload := time.NewTicker(s.directoryEvery)
+	defer reload.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-refresh.C:
+			s.probe(ctx)
+		case <-reload.C:
+			if s.Reload(ctx) == nil {
+				s.probe(ctx) // new sources are probed now, not at the next refresh
 			}
 		}
-	}()
-	workers.Wait()
+	}
+}
+
+// probe runs one complete probe round over the current sources.
+func (s *Service) probe(ctx context.Context) {
+	s.collector.Refresh(ctx, false)
+	if ctx.Err() != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.probed = s.loaded
+}
+
+func (s *Service) setRunning(running bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.running = running
+}
+
+func (s *Service) hasProbed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.probed
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
@@ -214,7 +257,6 @@ func (s *Service) readyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Service) readyResponse() (readyBody, int) {
-	probed := s.collector.Initialized()
 	var latest time.Time
 	serving := 0
 	for _, snapshot := range s.collector.Snapshots() {
@@ -225,7 +267,7 @@ func (s *Service) readyResponse() (readyBody, int) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ready := s.running && s.loaded && probed
+	ready := s.running && s.loaded && s.probed
 	code := http.StatusServiceUnavailable
 	if ready {
 		code = http.StatusOK
@@ -259,6 +301,11 @@ type readyBody struct {
 }
 
 func (s *Service) discovery(w http.ResponseWriter, r *http.Request) {
+	if !s.hasProbed() {
+		// Not an empty inventory: a consumer keeps what it had after a non-200 (issue #1, item 3).
+		http.Error(w, "the directory has not been loaded and probed yet", http.StatusServiceUnavailable)
+		return
+	}
 	body, err := json.Marshal(s.discoveryResponse())
 	if err != nil {
 		http.Error(w, "cannot encode discovery inventory", http.StatusInternalServerError)

@@ -34,6 +34,12 @@ export LIVEPEER_ONCHAIN_DISCOVERY_RPC_URL='https://arb-mainnet.example/rpc'
 The RPC URL usually carries a provider key. It is not written to the log, to
 `/readyz`, or to `--help`.
 
+CI runs `go mod tidy -diff`, `go vet ./...` and `go test -race ./...` on every
+pull request and every push to `main`. The schema tests serve real inventories
+through the service and validate `/discovery` against `docs/discovery.schema.json`
+from the pinned livepeer/node module, with `santhosh-tekuri/jsonschema/v6` v6.0.3
+and formats asserted, as node's own `discovery/schema_test.go` does.
+
 `GET /healthz`, `GET /readyz`, and `GET /discovery` share `127.0.0.1:8939`,
 which is the port the current stacks health-check.
 
@@ -110,7 +116,7 @@ Flags override the environment when the flag is present. Names use the prefix
 | `--refresh-interval` | `REFRESH_INTERVAL` | `5m` |
 | `--max-failed-refreshes` | `MAX_FAILED_REFRESHES` | `6`. `0` evicts on the first failed probe |
 | `--listen` | `LISTEN` | `127.0.0.1:8939` |
-| `--grants` | `GRANTS` | unset. Comma-separated IP, IP:port, or CIDR for private sources |
+| `--grants` | `GRANTS` | unset. Comma-separated IP, IP:port, or CIDR for private sources. Leave unset in production: anyone registered on chain chooses their own URI |
 
 ## Known limit
 

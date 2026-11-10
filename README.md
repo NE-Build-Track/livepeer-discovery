@@ -1,4 +1,4 @@
-# livepeer-discovery
+# livepeer-onchain-discovery
 
 A discovery process for Livepeer AI orchestrators. It reads the bonded pool on
 Arbitrum, keeps the orchestrators registered with an https service URI, and

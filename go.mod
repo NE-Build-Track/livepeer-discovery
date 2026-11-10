@@ -1,4 +1,4 @@
-module github.com/NE-Build-Track/livepeer-discovery
+module github.com/NE-Build-Track/livepeer-onchain-discovery
 
 go 1.27.3
 

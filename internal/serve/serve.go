@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NE-Build-Track/livepeer-discovery/internal/directory"
+	"github.com/NE-Build-Track/livepeer-onchain-discovery/internal/directory"
 	"github.com/livepeer/node/destination"
 	shared "github.com/livepeer/node/discovery/shared"
 )

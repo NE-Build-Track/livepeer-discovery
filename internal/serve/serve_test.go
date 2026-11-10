@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NE-Build-Track/livepeer-discovery/internal/directory"
+	"github.com/NE-Build-Track/livepeer-onchain-discovery/internal/directory"
 	"github.com/ethereum/go-ethereum/common"
 )
 

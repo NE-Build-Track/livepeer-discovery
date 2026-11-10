@@ -20,8 +20,8 @@ cutover, not this repository.
 
 ## Run
 
-The module requires the Go toolchain declared by `github.com/livepeer/node`
-v1.0.6 (Go 1.27.3). `GOTOOLCHAIN=auto` downloads it.
+The module requires the Go toolchain livepeer/node declares at the pin below
+(Go 1.27.3). `GOTOOLCHAIN=auto` downloads it.
 
 ```sh
 go test ./...
@@ -36,6 +36,16 @@ The RPC URL usually carries a provider key. It is not written to the log, to
 
 `GET /healthz`, `GET /readyz`, and `GET /discovery` share `127.0.0.1:8939`,
 which is the port the current stacks health-check.
+
+## livepeer/node pin
+
+`go.mod` pins livepeer/node at `f45d83fd68f73d195dffe8b45f6cac296d023c49`
+(`v1.0.7-0.20261105031836-f45d83fd68f7`), the commit that publishes
+`docs/discovery.schema.json` ([livepeer/node#49](https://github.com/livepeer/node/pull/49)).
+`/discovery` serves that schema's contract, and the tests validate it against the
+schema file in that module. The pin moves together with livepeer-builder-core's
+`docs/references/upstream-baseline.md`, which watches node for schema changes;
+this repository has no watcher of its own.
 
 ## Who is eligible
 

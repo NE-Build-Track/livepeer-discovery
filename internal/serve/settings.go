@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NE-Build-Track/livepeer-discovery/internal/directory"
+	"github.com/NE-Build-Track/livepeer-onchain-discovery/internal/directory"
 )
 
 // Settings is the process configuration. RPCURL is never written to a log by

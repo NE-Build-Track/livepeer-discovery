@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/NE-Build-Track/livepeer-discovery/internal/directory"
-	"github.com/NE-Build-Track/livepeer-discovery/internal/serve"
+	"github.com/NE-Build-Track/livepeer-onchain-discovery/internal/directory"
+	"github.com/NE-Build-Track/livepeer-onchain-discovery/internal/serve"
 	"github.com/livepeer/node/eth"
 )
 

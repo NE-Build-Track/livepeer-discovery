@@ -177,3 +177,40 @@ func TestARegistrationAtAPrivateAddressIsNeverProbed(t *testing.T) {
 		t.Fatalf("discovery = %d %s, want no sources", code, body)
 	}
 }
+
+// A registered URI can be a discovery service in front of several orchestrators. Its entries name
+// those orchestrators and are published as written, as livepeer/node's discovery does (issue #3).
+func TestAnAggregateURIIsPublishedAsItsSourceWroteIt(t *testing.T) {
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	entry := func(address string) string {
+		return `{"address":"` + address + `","runners":[{"url":"` + address + `/apps/a/app","app":"example","observed_at":"` + stamp + `"}]}`
+	}
+	front := orchestrator(t, nil, func(string) string {
+		return `[{"nodes":[{"url":"https://ai1.example:8936","queried_at":"` + stamp + `"}]},` +
+			entry("https://ai1.example:8936") + `,` + entry("https://ai2.example:8936") + `]`
+	})
+	_, server := probed(t, Config{Directory: fixedDirectory{urls: []string{front.URL}}, Grants: []string{"127.0.0.1"}})
+	code, body := fetch(t, server, "/discovery")
+	if code != http.StatusOK {
+		t.Fatalf("discovery = %d %s", code, body)
+	}
+	if err := validateDiscoveryJSON(t, discoverySchema(t), body); err != nil {
+		t.Fatalf("served inventory fails node's schema: %v\n%s", err, body)
+	}
+	var entries []struct {
+		Address string            `json:"address"`
+		Runners []json.RawMessage `json:"runners"`
+	}
+	if err := json.Unmarshal(body, &entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var got []string
+	for _, e := range entries {
+		if e.Address != "" && len(e.Runners) == 1 {
+			got = append(got, e.Address)
+		}
+	}
+	if fmt.Sprint(got) != "[https://ai1.example:8936 https://ai2.example:8936]" {
+		t.Fatalf("published addresses = %v, want both orchestrators the aggregate names\n%s", got, body)
+	}
+}

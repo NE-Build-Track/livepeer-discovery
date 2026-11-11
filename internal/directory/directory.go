@@ -1,5 +1,6 @@
 // Package directory reads the Livepeer orchestrator pool and keeps those
-// registered with an https service URI.
+// registered with a service URI. Probing, validation of what an orchestrator
+// answers, caching and eviction are livepeer/node's discovery collector's.
 package directory
 
 import (
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	shared "github.com/livepeer/node/discovery/shared"
 )
 
 // AIServiceRegistry is the Arbitrum AI Service Registry. The Controller does not
@@ -23,14 +25,11 @@ const AIServiceRegistry = "0x04C0b249740175999E5BF5c9ac1dA92431EF34C5"
 // ArbitrumController is the protocol Controller on Arbitrum mainnet.
 const ArbitrumController = "0xD8E8328501E9645d16Cf49539efC04f734606ee4"
 
-const (
-	defaultMaxPool = 1000
-	manifestSuffix = "/.well-known/livepeer-registry.json"
-)
+const defaultMaxPool = 1000
 
 // Orchestrator is an eligible orchestrator's base URL and Ethereum address.
 type Orchestrator struct {
-	URL     string
+	URL     *url.URL
 	Address common.Address
 }
 
@@ -95,7 +94,7 @@ func (d *Directory) Load(ctx context.Context) ([]Orchestrator, error) {
 			found = append(found, *orch)
 		}
 	}
-	return unique(found), nil
+	return found, nil
 }
 
 func (d *Directory) registry(ctx context.Context) (common.Address, error) {
@@ -118,8 +117,8 @@ func (d *Directory) pool(ctx context.Context, bonding common.Address) ([]common.
 	if err != nil {
 		return nil, err
 	}
-	size, ok := bigInt(values)
-	if !ok || size.Sign() < 0 {
+	size, ok := result[*big.Int](values)
+	if !ok || size == nil || size.Sign() < 0 {
 		return nil, malformed()
 	}
 	limit := d.maxPool()
@@ -133,7 +132,7 @@ func (d *Directory) pool(ctx context.Context, bonding common.Address) ([]common.
 	if err != nil {
 		return nil, err
 	}
-	address, ok := addressResult(values)
+	address, ok := result[common.Address](values)
 	if !ok {
 		return nil, malformed()
 	}
@@ -149,7 +148,7 @@ func (d *Directory) pool(ctx context.Context, bonding common.Address) ([]common.
 		if err != nil {
 			return nil, err
 		}
-		address, ok = addressResult(values)
+		address, ok = result[common.Address](values)
 		if !ok {
 			return nil, malformed()
 		}
@@ -162,7 +161,7 @@ func (d *Directory) eligible(ctx context.Context, bonding, registry, address com
 	if err != nil {
 		return nil, d.orchestratorRead(address, err)
 	}
-	active, ok := boolResult(values)
+	active, ok := result[bool](values)
 	if !ok {
 		return nil, malformed()
 	}
@@ -173,7 +172,7 @@ func (d *Directory) eligible(ctx context.Context, bonding, registry, address com
 	if err != nil {
 		return nil, d.orchestratorRead(address, err)
 	}
-	uri, ok := stringResult(values)
+	uri, ok := result[string](values)
 	if !ok {
 		return nil, malformed()
 	}
@@ -181,17 +180,13 @@ func (d *Directory) eligible(ctx context.Context, bonding, registry, address com
 	if uri == "" {
 		return nil, nil
 	}
-	if strings.HasSuffix(strings.TrimRight(uri, "/"), manifestSuffix) {
-		d.logger().Info("orchestrator registered a network-modules manifest, which this service does not read",
-			"event", "discovery.registry_manifest_skipped", "orchestrator", address.Hex())
-		return nil, nil
-	}
-	base, ok := httpsBase(uri)
-	if !ok {
+	base, err := url.Parse(uri)
+	if err != nil || shared.ValidateURL(base) != nil {
 		d.logger().Warn("orchestrator registered an unusable service URI",
 			"event", "discovery.service_uri_invalid", "orchestrator", address.Hex())
 		return nil, nil
 	}
+	base.Path, base.RawPath = strings.TrimRight(base.Path, "/"), ""
 	return &Orchestrator{URL: base, Address: address}, nil
 }
 
@@ -336,57 +331,13 @@ func leadingInt(msg, marker string) (int, bool) {
 
 func malformed() *Error { return &Error{Reason: "malformed_result", Transient: true} }
 
-func bigInt(values []any) (*big.Int, bool) {
+// result is a call's single return value. node's ABI unpack types it; a fake or a broken
+// RPC that returns something else fails the load as malformed_result.
+func result[T any](values []any) (T, bool) {
+	var zero T
 	if len(values) != 1 {
-		return nil, false
+		return zero, false
 	}
-	size, ok := values[0].(*big.Int)
-	return size, ok && size != nil
-}
-
-func addressResult(values []any) (common.Address, bool) {
-	if len(values) != 1 {
-		return common.Address{}, false
-	}
-	address, ok := values[0].(common.Address)
-	return address, ok
-}
-
-func boolResult(values []any) (bool, bool) {
-	if len(values) != 1 {
-		return false, false
-	}
-	value, ok := values[0].(bool)
+	value, ok := values[0].(T)
 	return value, ok
-}
-
-func stringResult(values []any) (string, bool) {
-	if len(values) != 1 {
-		return "", false
-	}
-	value, ok := values[0].(string)
-	return value, ok
-}
-
-func httpsBase(raw string) (string, bool) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", false
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	return parsed.String(), true
-}
-
-func unique(orchestrators []Orchestrator) []Orchestrator {
-	seen := map[string]bool{}
-	out := make([]Orchestrator, 0, len(orchestrators))
-	for _, orch := range orchestrators {
-		if seen[orch.URL] {
-			continue
-		}
-		seen[orch.URL] = true
-		out = append(out, orch)
-	}
-	return out
 }

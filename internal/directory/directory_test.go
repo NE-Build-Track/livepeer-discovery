@@ -12,7 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func TestActiveHTTPSOrchestratorIsKeptFromTheAIRegistry(t *testing.T) {
+func TestActiveOrchestratorIsKeptFromTheAIRegistry(t *testing.T) {
 	orch := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	chain := &fakeChain{
 		bonding: common.HexToAddress("0x1111111111111111111111111111111111111111"),
@@ -28,7 +28,7 @@ func TestActiveHTTPSOrchestratorIsKeptFromTheAIRegistry(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("orchestrators = %d, want 1", len(got))
 	}
-	if got[0].URL != "https://orch.example" || got[0].Address != orch {
+	if got[0].URL.String() != "https://orch.example" || got[0].Address != orch {
 		t.Fatalf("got %+v", got[0])
 	}
 	if chain.uriRegistry != common.HexToAddress(AIServiceRegistry) {
@@ -39,34 +39,45 @@ func TestActiveHTTPSOrchestratorIsKeptFromTheAIRegistry(t *testing.T) {
 	}
 }
 
-func TestInactiveEmptyHTTPAndManifestRegistrationsAreLeftOut(t *testing.T) {
+// The directory reads the chain only. A URI node's ValidateURL accepts is a source: an http URI or a
+// manifest URI is probed like any other and evicted by node's collector if it does not answer.
+func TestInactiveEmptyAndInvalidRegistrationsAreLeftOut(t *testing.T) {
 	kept := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	inactive := common.HexToAddress("0x0000000000000000000000000000000000000002")
 	empty := common.HexToAddress("0x0000000000000000000000000000000000000003")
 	plain := common.HexToAddress("0x0000000000000000000000000000000000000004")
 	manifest := common.HexToAddress("0x0000000000000000000000000000000000000005")
+	credentials := common.HexToAddress("0x0000000000000000000000000000000000000006")
+	query := common.HexToAddress("0x0000000000000000000000000000000000000007")
 	chain := &fakeChain{
 		bonding: common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		size:    big.NewInt(5),
+		size:    big.NewInt(7),
 		first:   kept,
 		next: map[common.Address]common.Address{
-			kept: inactive, inactive: empty, empty: plain, plain: manifest,
+			kept: inactive, inactive: empty, empty: plain, plain: manifest, manifest: credentials, credentials: query,
 		},
-		active: map[common.Address]bool{kept: true, inactive: false, empty: true, plain: true, manifest: true},
+		active: map[common.Address]bool{kept: true, inactive: false, empty: true, plain: true, manifest: true, credentials: true, query: true},
 		uris: map[common.Address]string{
-			kept:     "https://kept.example",
-			inactive: "https://inactive.example",
-			empty:    "",
-			plain:    "http://plain.example",
-			manifest: "https://manifest.example/.well-known/livepeer-registry.json",
+			kept:        "https://kept.example/",
+			inactive:    "https://inactive.example",
+			empty:       "",
+			plain:       "http://plain.example",
+			manifest:    "https://manifest.example/.well-known/livepeer-registry.json",
+			credentials: "https://user:pass@credentials.example",
+			query:       "https://query.example/?x=1",
 		},
 	}
 	got, err := (&Directory{Chain: chain, RetryDelays: []time.Duration{}}).Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(got) != 1 || got[0].Address != kept || got[0].URL != "https://kept.example" {
-		t.Fatalf("got %+v, want only https://kept.example", got)
+	var urls []string
+	for _, orch := range got {
+		urls = append(urls, orch.URL.String())
+	}
+	want := []string{"https://kept.example", "http://plain.example", "https://manifest.example/.well-known/livepeer-registry.json"}
+	if fmt.Sprint(urls) != fmt.Sprint(want) {
+		t.Fatalf("sources = %v, want %v", urls, want)
 	}
 }
 
@@ -90,7 +101,7 @@ func TestControllerSettingReadsTheProtocolRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(got) != 1 || got[0].URL != "https://protocol.example" {
+	if len(got) != 1 || got[0].URL.String() != "https://protocol.example" {
 		t.Fatalf("got %+v, want the protocol registry URI", got)
 	}
 	if chain.uriRegistry != protocol || !chain.resolvedServiceRegistry {
@@ -163,7 +174,7 @@ func TestARevertingOrchestratorIsSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(got) != 1 || got[0].Address != good || got[0].URL != "https://good.example" {
+	if len(got) != 1 || got[0].Address != good || got[0].URL.String() != "https://good.example" {
 		t.Fatalf("got %+v, want the readable orchestrator", got)
 	}
 }

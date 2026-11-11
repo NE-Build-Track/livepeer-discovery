@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -272,7 +273,11 @@ type fixedDirectory struct{ urls []string }
 func (d fixedDirectory) Load(context.Context) ([]directory.Orchestrator, error) {
 	out := make([]directory.Orchestrator, len(d.urls))
 	for i, raw := range d.urls {
-		out[i] = directory.Orchestrator{URL: raw}
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = directory.Orchestrator{URL: parsed}
 	}
 	return out, nil
 }

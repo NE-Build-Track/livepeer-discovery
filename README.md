@@ -1,12 +1,13 @@
 # livepeer-onchain-discovery
 
 Turns the Livepeer chain into a discovery source. It reads the bonded pool on
-Arbitrum, keeps the orchestrators registered with an `https` URI in the AI
-Service Registry, probes each one, and serves their runners at `GET /discovery`
-in livepeer/node's contract ([schema](https://github.com/livepeer/node/blob/f45d83fd68f73d195dffe8b45f6cac296d023c49/docs/discovery.schema.json)).
-That is all it does: no static list and no filtering beyond what
-[What each orchestrator may advertise](#what-each-orchestrator-may-advertise)
-describes.
+Arbitrum, keeps the active orchestrators with a service URI in the AI Service
+Registry, and hands them to livepeer/node's discovery collector as sources. It
+serves the collector's inventory at `GET /discovery` in livepeer/node's contract
+([schema](https://github.com/livepeer/node/blob/f45d83fd68f73d195dffe8b45f6cac296d023c49/docs/discovery.schema.json)).
+That is all it does. It has no static list, and it applies no rules of its own
+to what a source answers: probing, validation, caching, merging and eviction
+are node's.
 
 ## Combining it with other sources
 
@@ -70,7 +71,7 @@ On each directory load the process looks up `BondingManager` in the Controller
 reported pool size, at 1000, and at a repeated address.
 
 An orchestrator is kept when `isActiveTranscoder` is true and `getServiceURI`
-is a non-empty `https` base URL. The default registry is the AI Service
+is a base URL node's `ValidateURL` accepts. The default registry is the AI Service
 Registry `0x04C0b249740175999E5BF5c9ac1dA92431EF34C5`. The Controller does not
 register that contract, so this is an override of the protocol
 `ServiceRegistry`. `--service-registry controller` reads the protocol registry
@@ -80,8 +81,11 @@ ABI.
 These registrations are not kept:
 
 - an inactive orchestrator, or an empty URI
-- a URI that is not `https`, or that has user info, a query, or a fragment
-- a network-modules manifest, a URI ending in `/.well-known/livepeer-registry.json`
+- a URI that is not absolute `http` or `https`, or that has user info, a query,
+  or a fragment, logged as `discovery.service_uri_invalid`
+
+Any other URI is a source. One that does not answer `/discovery`, such as a
+network-modules manifest, is evicted by node's collector like any failing source.
 
 One orchestrator whose own call reverts is skipped. A failure of the RPC
 itself (HTTP 429 or 5xx, JSON-RPC `-32005` or `-32603`, or a transport
@@ -91,13 +95,17 @@ directory interval, and nothing is published until a load succeeds. A malformed
 chain result fails the load rather than being read as "not registered".
 
 Each registered source is probed at `<base>/discovery`. There is no static
-list and no orchestrator file.
+list and no orchestrator file. A source that is itself a discovery service, in
+front of several orchestrators, is served as it answers: its entries name the
+orchestrators that own the runners.
 
 ## HTTP
 
-`GET /discovery` is livepeer/node's inventory. A `nodes` metadata entry lists
-each source that has answered and when it was last queried. Runner objects are
-the JSON the orchestrator sent. There is no app filter.
+`GET /discovery` is livepeer/node's inventory, built as node's discovery builds
+it: each entry under the `address` its source wrote, and node's merge when two
+sources list the same runner. A `nodes` metadata entry lists each source that
+has answered and when it was last queried. Runner objects are the JSON the
+source sent. There is no app filter.
 
 Until the first directory load and the first complete probe round have finished,
 `/discovery` answers 503, not an empty inventory. A consumer, livepeer/node's
@@ -120,26 +128,12 @@ node collector's: 5 at a time, a 3s timeout, no redirects, and the system's
 trust store. Private addresses are refused unless granted. The cache is memory
 only and is dropped on exit.
 
-## What each orchestrator may advertise
+## What a source may advertise
 
-Each registered orchestrator speaks only for itself. An entry whose `address` is
-not the probed orchestrator's registered base URL is dropped and logged as
-`discovery.foreign_entry_dropped`, with the orchestrator's on-chain address.
-Scheme, host, port and path are compared; a default port or a trailing slash
-does not matter. A stock livepeer/node orchestrator always reports its own
-service address.
-
-A runner URL that more than one orchestrator advertises is kept from each of
-them, and the node collector's merge serves the newest record. It is logged as
-`discovery.runner_url_contested`, with every orchestrator's on-chain address.
-The contract cannot say who owns a runner URL, which may sit on a proxy host.
-
-Each finding is logged once, when it first appears. `/readyz` reports the last
-probe round's counts as `dropped_foreign_entries` and `contested_runner_urls`.
-
-There is no allowlist, and no rule on a runner's `metadata`: the chain's
-admission bar above is the only one. A curated list belongs in livepeer/node's
-static `Nodes` configuration.
+Whatever node's discovery would publish from it. There is no allowlist, no
+check that an entry's `address` is the source's own, and no rule on a runner's
+`metadata`: the chain's admission bar above is the only one. A curated list
+belongs in livepeer/node's static `Nodes` configuration.
 
 ## Settings
 
@@ -173,6 +167,10 @@ with no change here. That is the same limit as node's `livepeer-discovery`.
   keeps its list unexported, so the list is applied with `Collector.SetSources`.
   A static `Nodes` list stays in livepeer/node's TOML config, and node's
   discovery combines sources.
+- No trust rules of its own (issue #3). This service only decides who is a
+  source. An earlier rule that each source speak only for its own address
+  dropped every runner behind an aggregated service URI, and node's discovery
+  has no such rule.
 - The AI Service Registry is the default because that is where AI orchestrators
   register, and the Controller does not know that contract.
 - Health and discovery share one listener so a check of port 8939 sees
